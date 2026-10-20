@@ -9,7 +9,7 @@ android {
     }
 
     defaultConfig {
-        applicationId = "xposed.hook"
+        applicationId = "classic.panel"
         minSdk = 24
         targetSdk = 37
         versionCode = 1
