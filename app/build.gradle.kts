@@ -9,7 +9,7 @@ android {
     }
 
     defaultConfig {
-        applicationId = "classic.panel"
+        applicationId = "io.github.ex3124.flymeclassicpanel"
         minSdk = 24
         targetSdk = 37
         versionCode = 1
