@@ -69,7 +69,6 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
  */
 public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResources {
 
-    private static final String TAG = "CCRestore: ";
     private static final String SYSUI = "com.android.systemui";
 
     /* ---------------------------- tunables ---------------------------- */
@@ -365,18 +364,6 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
      * the value is kept in dp so another density lands on the same line.
      */
     private static final float CHIP_ROW_UP_PORTRAIT_DP = 10.8f;
-    /**
-     * Landscape: how far the same chip has to move <b>down</b> onto the status bar's line.
-     *
-     * <p>Measured on the device (3192x1368, both rotations): the status bar's glyphs occupy rows
-     * 83..116 (centre 99.5px) while the chip is centred on 74 -- 25.5px too high, because
-     * {@code updatePadding} drops the group's 38dp top padding in landscape, so the chip starts
-     * higher there than in portrait.  Published for the log line only: {@link #alignPrivacyChipRow}
-     * measures the offset from the two rows themselves rather than applying this number, because the
-     * wrapper padding that carries it in landscape is read once per inflation and cannot be moved by
-     * a dimen (see {@link #putPrivacyChipRowDimens}).
-     */
-    private static final float CHIP_ROW_DOWN_LAND_DP = 7.3f;
     /** Stock value of the portrait dimen {@link #putPrivacyChipRowDimens} rewrites (no config variants). */
     private static final float CHIP_GROUP_TOP_STOCK_DP = 38f;
     /**
@@ -389,8 +376,6 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
      * inset, which is 130px in one landscape rotation and 0 in the other.
      */
     private static volatile int idNotificationScroller = 0;
-    /** Guards hook 11's one-shot log lines. */
-    private static volatile boolean sChipRowLogged = false;
 
     /* ---------------- the "收纳箱 / 不重要通知" panel (portrait) ---------------- */
 
@@ -556,8 +541,6 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
      * screenshots (~30px inset on the control centre's card): 30/63 = 0.48.
      */
     private static final float BRIGHTNESS_MIRROR_CORNER_RATIO = 0.48f;
-    /** Guards {@link #hookBrightnessMirrorAlign}'s one-shot log line. */
-    private static volatile boolean sMirrorLogged = false;
 
     /* --------------- backdrop blur while the brightness mirror page is up --------------- */
 
@@ -599,8 +582,6 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
     private static volatile boolean sBrightnessMirrorUp = false;
     /** The mirror container, cached: {@link #brightnessMirrorUp()} runs on every gate tick. */
     private static volatile View sMirrorPage;
-    /** Guards the one-shot log line of the suppression itself. */
-    private static volatile boolean sMirrorBlurLogged = false;
 
     /* ---------------------------- state ------------------------------- */
 
@@ -640,7 +621,7 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
      * decide whether a row still has to be invalidated: a row whose cached list was recorded before
      * the veil came up paints the vendor's blur even though {@code setBlurBackground()} has been
      * replayed white, which is the reported "pull down into the control centre and the notification
-     * cards are wrong until one is dragged" bug.  It doubles as the theme-switch log marker.
+     * cards are wrong until one is dragged" bug.
      */
     private static final Map<View, Integer> sCardFillColor = new java.util.WeakHashMap<>();
     /**
@@ -760,8 +741,6 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
     private static volatile boolean sRowsNightInit = false;
     /** {@code ActivatableNotificationView} -- the owner of the row's theme-aware setBackground(). */
     private static volatile Class<?> sRowClass;
-    /** Guards the one-shot failure log of the row rebuild. */
-    private static volatile boolean sRowRefreshFailed = false;
     /** Every live {@code StatusBarHeaderView} (the classic shade's and the lock screen CC's). */
     private static final java.util.List<java.lang.ref.WeakReference<View>> sHeaderViews =
             new java.util.ArrayList<>();
@@ -795,11 +774,6 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
             new java.lang.ref.WeakReference<>(null);
     /** Guards the re-entrancy of our own {@code setBackground()} call on the media card. */
     private static volatile boolean sMediaFilling = false;
-    private static volatile boolean sMediaCardLogged = false;
-    private static volatile boolean sCardLogged = false;
-    private static volatile long sLastCardLog = 0L;
-    private static volatile boolean sCardReplayFailed = false;
-    private static volatile long sLastTintLog = 0L;
     private static volatile Object sManager;
     private static volatile Object sPanelController;
     /** The Flyme control-centre panel controller ({@code CenterController}); the lock-screen pull-down expands it. */
@@ -810,14 +784,9 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
     private static volatile float sBlurDrive = 0f;
     /** The mask alpha applyCoverAlpha() last put on the cover -- frames the blur strength. */
     private static volatile float sMaskAlpha = 0f;
-    private static volatile boolean sTintLogged = false;
-    private static volatile boolean sExpansionLogged = false;
-    private static volatile long sLastAlphaLog = 0L;
-    private static volatile long sLastExpLog = 0L;
     /** {@code dimen/status_bar_headerview_height}, the height both control centres' headers want. */
     private static int idHeaderHeight = 0x7f07112d;
     private static volatile ClassLoader sClassLoader;
-    private static volatile boolean sKgLogged = false;
     private static volatile boolean sShadeOpen = false;
     private static final java.util.Map<View, Float> sSliderRadius = new java.util.WeakHashMap<>();
 
@@ -968,7 +937,6 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
 
             Object impl = XposedHelpers.getObjectField(res, "mResourcesImpl");
             if (impl == null) {
-                log("1 resources: mResourcesImpl null");
                 return;
             }
             XposedBridge.hookAllMethods(impl.getClass(), "getValue", new XC_MethodHook() {
@@ -1037,25 +1005,19 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
                     }
                 }
             });
-            log("1 resources hooked: " + COLOR_OVERRIDES.size() + " colours ("
-                    + COLOR_OVERRIDES_NIGHT.size() + " with a night value), night=" + sNightUi);
-        } catch (Throwable t) {
-            log("1 resources FAILED");
-            XposedBridge.log(t);
+        } catch (Throwable ignored) {
         }
     }
 
     private static void putColor(Resources res, String name, int color) {
         int id = res.getIdentifier(name, "color", SYSUI);
         if (id != 0) COLOR_OVERRIDES.put(id, color);
-        else log("1 missing colour " + name);
     }
 
     /** Dark-mode counterpart of {@link #putColor}. */
     private static void putColorNight(Resources res, String name, int color) {
         int id = res.getIdentifier(name, "color", SYSUI);
         if (id != 0) COLOR_OVERRIDES_NIGHT.put(id, color);
-        else log("1 missing night colour " + name);
     }
 
     /* ---------------------------- night mode ---------------------------- */
@@ -1083,7 +1045,6 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
             boolean night = isNight(res);
             if (night != sNightUi) {
                 sNightUi = night;
-                log("night mode -> " + night + " (panel repainted)");
             }
         }
         return sNightUi;
@@ -1131,7 +1092,6 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
     private static void putDimen(Resources res, String name, float dp) {
         int id = res.getIdentifier(name, "dimen", SYSUI);
         if (id == 0) {
-            log("1 missing dimen " + name);
             return;
         }
         DIMEN_OVERRIDES.put(id, Math.round(dp * res.getDisplayMetrics().density));
@@ -1145,7 +1105,6 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
     private static void putDimenLand(Resources res, String name, float dp) {
         int id = res.getIdentifier(name, "dimen", SYSUI);
         if (id == 0) {
-            log("1 missing dimen " + name);
             return;
         }
         DIMEN_LAND_OVERRIDES.put(id, Math.round(dp * res.getDisplayMetrics().density));
@@ -1205,8 +1164,6 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
         // All three constants are dp on the screen; dpToWrittenPx() turns them into the number the
         // dimension has to carry, so the same dp geometry lands on a display of any density.
         int add = dpToWrittenPx(res, FILTER_PANEL_SHIFT_DP);              // 46dp -> 161 written
-        log("1 filter panel shift: " + FILTER_PANEL_SHIFT_DP + "dp -> " + add
-                + " written px (the layout uses the number as screen px on this build)");
         addPortDimenShift(res, "classic_notification_filter_header_margin_top", add,
                 FILTER_HEADER_MARGIN_TOP_STOCK_DP);
         addPortDimenShift(res, "classic_notification_filter_panel_stack_margin_top", add,
@@ -1226,7 +1183,6 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
     private static void addLandDimenShift(Resources res, String name, int addPx, float stockLandscapeDp) {
         int id = res.getIdentifier(name, "dimen", SYSUI);
         if (id == 0) {
-            log("1 missing land shift dimen " + name);
             return;
         }
         Integer base = DIMEN_OVERRIDES.get(id);
@@ -1240,7 +1196,6 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
             px = Math.round(stockLandscapeDp * res.getDisplayMetrics().density);
         }
         DIMEN_LAND_OVERRIDES.put(id, px + addPx);
-        log("1 land shift dimen " + name + ": " + px + " -> " + (px + addPx) + " px");
     }
 
     /**
@@ -1292,14 +1247,12 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
     private static void putPrivacyChipRowDimens(Resources res) {
         int groupTop = res.getIdentifier("notification_ongoing_filter_group_padding_top", "dimen", SYSUI);
         if (groupTop == 0) {
-            log("1 missing dimen notification_ongoing_filter_group_padding_top");
             return;
         }
         int stock = Math.round(CHIP_GROUP_TOP_STOCK_DP * res.getDisplayMetrics().density);
         int px = Math.round((CHIP_GROUP_TOP_STOCK_DP - CHIP_ROW_UP_PORTRAIT_DP)
                 * res.getDisplayMetrics().density);
         DIMEN_PORT_OVERRIDES.put(groupTop, px);
-        log("1 privacy chip row portrait: group paddingTop " + stock + " -> " + px + "px");
     }
 
     /**
@@ -1310,7 +1263,6 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
     private static void addPortDimenShift(Resources res, String name, int addPx, float stockPortraitDp) {
         int id = res.getIdentifier(name, "dimen", SYSUI);
         if (id == 0) {
-            log("1 missing shift dimen " + name);
             return;
         }
         Integer base = DIMEN_OVERRIDES.get(id);
@@ -1324,7 +1276,6 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
             px = Math.round(stockPortraitDp * res.getDisplayMetrics().density);
         }
         DIMEN_PORT_OVERRIDES.put(id, px + addPx);
-        log("1 shift dimen " + name + ": " + px + " -> " + (px + addPx) + " px");
     }
 
     /* ================================================================== */
@@ -1354,13 +1305,10 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
                         sManager = param.thisObject;
                         Object root = param.args[0];
                         if (root instanceof ViewGroup) installCover((ViewGroup) root);
-                    } catch (Throwable t) {
-                        log("2 installCover FAILED");
-                        XposedBridge.log(t);
+                    } catch (Throwable ignored) {
                     }
                 }
             });
-            log("2 hook setNotificationShadeWindowView");
 
             hookViewColor("com.flyme.systemui.statusbar.phone.StatusBarHeaderView",
                     lpparam.classLoader, "4 StatusBarHeaderView");
@@ -1374,13 +1322,10 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
                 protected void afterHookedMethod(MethodHookParam param) {
                     try {
                         fixHeader((View) param.thisObject);
-                    } catch (Throwable t) {
-                        log("4b fixHeader FAILED");
-                        XposedBridge.log(t);
+                    } catch (Throwable ignored) {
                     }
                 }
             });
-            log("4b hook StatusBarHeaderView.updateDateLocation");
             // The row shift cannot come from updateDateLocation (landscape only) nor from
             // StatusBarHeaderView#onLayout (not overridden, so hookAllMethods finds nothing).
             // RelativeLayout#onLayout is the method the header actually inherits; filter by type.
@@ -1396,7 +1341,6 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
                             }
                         }
                     });
-            log("4c hook RelativeLayout.onLayout (header row shift)");
 
             // The floating brightness bar needs x correction -- see BRIGHTNESS_MIRROR_OFFSET_DP.
             hookBrightnessMirrorAlign(lpparam.classLoader);
@@ -1426,7 +1370,6 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {
                     sPanelController = param.thisObject;
-                    log("3c NotificationPanelViewController captured");
                 }
             });
 
@@ -1439,11 +1382,9 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
                     @Override
                     protected void afterHookedMethod(MethodHookParam param) {
                         sCenter = param.thisObject;
-                        log("3d CenterController captured");
                     }
                 });
-            } catch (Throwable t) {
-                log("3d CenterController hook failed: " + t);
+            } catch (Throwable ignored) {
             }
 
             // The lock screen's pull-down expands that panel, and the old design's transition is
@@ -1457,30 +1398,24 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
                 protected void afterHookedMethod(MethodHookParam param) {
                     try {
                         styleSliderWrapper((View) param.thisObject);
-                    } catch (Throwable t) {
-                        log("6 styleSliderWrapper FAILED");
-                        XposedBridge.log(t);
+                    } catch (Throwable ignored) {
                     }
                 }
             });
-            log("6 hook MzQSPanel.onFinishInflate");
 
             XposedBridge.hookAllMethods(panel, "updateResources", new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {
                     try {
                         alignQsColumn((View) param.thisObject);
-                    } catch (Throwable t) {
-                        XposedBridge.log(t);
+                    } catch (Throwable ignored) {
                     }
                     try {
                         keepTileGridGap((View) param.thisObject);
-                    } catch (Throwable t) {
-                        XposedBridge.log(t);
+                    } catch (Throwable ignored) {
                     }
                 }
             });
-            log("6b hook MzQSPanel.updateResources");
 
             // The vendor hides this row from its own visibility pass, which can run after
             // updateResources(); re-assert the row right after it so the band its topMargin carries
@@ -1490,24 +1425,20 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
                 protected void afterHookedMethod(MethodHookParam param) {
                     try {
                         keepTileGridGap((View) param.thisObject);
-                    } catch (Throwable t) {
-                        XposedBridge.log(t);
+                    } catch (Throwable ignored) {
                     }
                 }
             });
-            log("6f hook MzQSPanel.setMediaWrapperVisibility");
 
             XposedBridge.hookAllMethods(panel, "onLayout", new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {
                     try {
                         narrowSliderTracks((View) param.thisObject);
-                    } catch (Throwable t) {
-                        XposedBridge.log(t);
+                    } catch (Throwable ignored) {
                     }
                 }
             });
-            log("6c hook MzQSPanel.onLayout");
 
             hookNotificationCardTint(lpparam.classLoader);
 
@@ -1521,10 +1452,7 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
 
             hookEmptyShadeView(lpparam.classLoader);
 
-            log("ALL hooks installed");
-        } catch (Throwable t) {
-            log("handleLoadPackage FAILED");
-            XposedBridge.log(t);
+        } catch (Throwable ignored) {
         }
     }
 
@@ -1565,17 +1493,14 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
                     }
                     View v = (View) param.thisObject;
                     recordCardBackground(v, param.args);
-                    logCardState(v, (Integer) param.args[1]);
                 }
             });
-            log("7 hook NotificationBackgroundView.setBlurBackground");
 
             // The row's own colour is re-applied as a drawable alpha by the vendor whenever the
             // panel or the row changes state (updateLiveBlurAlpha -> setBackgroundBlurDrawableAlpha
             // -> setDrawableAlpha).  It is the one path that can make a card see-through again
             // without ever calling setBlurBackground, so it is watched from both ends: while the
-            // classic veil is up the alpha is forced opaque, and the event is logged so a
-            // regression can be attributed to a concrete caller.
+            // classic veil is up the alpha is forced opaque.
             XposedBridge.hookAllMethods(bgView, "setDrawableAlpha", new XC_MethodHook() {
                 @Override
                 protected void beforeHookedMethod(MethodHookParam param) {
@@ -1589,15 +1514,10 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
                     // alpha it animates, so nothing is pinned.
                     boolean classic = sShadeOpen && !sNightUi;
                     if (classic && want != 255) {
-                        logCardEvent("setDrawableAlpha(" + want + ") forced 255");
                         param.args[0] = 255;
-                    } else if (!classic) {
-                        logCardEvent("setDrawableAlpha(" + want + ") left alone ("
-                                + (sNightUi ? "night" : "shade closed") + ")");
                     }
                 }
             });
-            log("7c hook NotificationBackgroundView.setDrawableAlpha");
 
             // The row's frosted layer is re-faded by the vendor's live-blur pass
             // (updateLiveBlurAlpha -> setBackgroundBlurDrawableAlpha), which runs AFTER the row has
@@ -1613,12 +1533,10 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
                     }
                     int want = (Integer) param.args[0];
                     if (want != 255) {
-                        logCardEvent("updateLiveBlurAlpha(" + want + ") pinned 255");
                         param.args[0] = 255;
                     }
                 }
             });
-            log("7f hook NotificationBackgroundView.updateLiveBlurAlpha");
 
             // The vendor's card is a single BackgroundBlurDrawable that carries BOTH the frosted
             // backdrop and the fill colour, and its alpha is re-driven on every row state change
@@ -1652,7 +1570,6 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
                     if (d != null) d.setCorners(top, bottom);
                 }
             });
-            log("7g hook NotificationBackgroundView.onDraw / setRadius");
 
             Class<?> row = XposedHelpers.findClass(
                     "com.android.systemui.statusbar.notification.row.ActivatableNotificationView", cl);
@@ -1666,19 +1583,8 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
                     if (sShadeOpen && !sRowThemeRefresh) applyCardTint(true);
                 }
             });
-            log("7b hook ActivatableNotificationView.setBackground");
-        } catch (Throwable t) {
-            log("7 notification card hook FAILED: " + t);
-            XposedBridge.log(t);
+        } catch (Throwable ignored) {
         }
-    }
-
-    /** Throttled per-row event log, so one gesture cannot flood the LSPosed log. */
-    private static void logCardEvent(String msg) {
-        long now = android.os.SystemClock.uptimeMillis();
-        if (now - sLastCardLog < 400) return;
-        sLastCardLog = now;
-        log("7 event: " + msg);
     }
 
     /* -------- classic card fill (painted by us, bypassing the vendor's blur drawable) -------- */
@@ -1847,8 +1753,6 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
         sCardScrim.put(v, Integer.valueOf(cardScrimAlpha()));
         if (was != want) {
             sCardFillColor.put(v, want);
-            logCardEvent("classic card fill installed 0x" + Integer.toHexString(want)
-                    + " (r=" + top + "/" + bottom + ")");
         }
         return d;
     }
@@ -1897,8 +1801,6 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
     private static final Map<View, ClassicCardFill> sQsCardFill = new java.util.WeakHashMap<>();
     /** Which fill (colour) each control-centre card currently carries. */
     private static final Map<View, Integer> sQsCardApplied = new java.util.WeakHashMap<>();
-    /** Guards {@link #applyQsCardFill}'s one-shot log line. */
-    private static volatile boolean sQsCardLogged = false;
 
     /**
      * Give one control-centre card ({@code connectivity_tiles_wrapper} or {@code slider_wrapper}) the
@@ -1975,11 +1877,6 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
             card.invalidate();
         }
         sQsCardApplied.put(card, want);
-        if (!sQsCardLogged) {
-            sQsCardLogged = true;
-            log("6 qs card fill 0x" + Integer.toHexString(want) + " r=" + Math.round(radius)
-                    + "px (connectivity + sliders)");
-        }
     }
 
     /**
@@ -2015,8 +1912,6 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
             if (old == null) {
                 sCardViews.add(new java.lang.ref.WeakReference<>(v));
                 if (sCardArgs.size() <= 3) {
-                    log("7 card recorded: color=0x" + Integer.toHexString((Integer) args[1])
-                            + " static=" + args[0] + " clipRadius=" + args[2]);
                 }
             }
             sCardArgs.put(v, args.clone());
@@ -2074,23 +1969,16 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
         }
         if (owners.isEmpty()) return;
         sRowThemeRefresh = true;
-        int ok = 0;
         try {
             for (View owner : owners) {
                 try {
                     XposedHelpers.callMethod(owner, "setBackground");
-                    ok++;
-                } catch (Throwable t) {
-                    if (!sRowRefreshFailed) {
-                        sRowRefreshFailed = true;
-                        log("7 row theme refresh FAILED: " + t);
-                    }
+                } catch (Throwable ignored) {
                 }
             }
         } finally {
             sRowThemeRefresh = false;
         }
-        log("7 notification rows rebuilt for night=" + sNightUi + " (" + ok + "/" + owners.size() + ")");
     }
 
     /** Add one view to a weak list, identity-deduped, pruning the collected refs on the way. */
@@ -2172,19 +2060,16 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
                 // which is the method the module's hook forces to the dark ink in light mode.
                 XposedHelpers.callMethod(dispatcher, "applyDark", header);
                 headers++;
-            } catch (Throwable t) {
-                logOnceReInk("header", t);
+            } catch (Throwable ignored) {
             }
         }
         for (View tile : liveViews(sTileViews, true)) {
             try {
                 XposedHelpers.callMethod(tile, "updateResources");
                 tiles++;
-            } catch (Throwable t) {
-                logOnceReInk("tile", t);
+            } catch (Throwable ignored) {
             }
         }
-        log("re-ink for night=" + sNightUi + ": headers=" + headers + " tiles=" + tiles);
     }
 
     /** {@code Dependency.get(DarkIconDispatcher.class)} -- the status-bar ink dispatcher. */
@@ -2198,57 +2083,12 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
                     "com.android.systemui.plugins.DarkIconDispatcher", cl);
             d = XposedHelpers.callStaticMethod(dep, "get", iface);
             sDarkDispatcher = d;
-        } catch (Throwable t) {
-            logOnceReInk("dispatcher", t);
+        } catch (Throwable ignored) {
         }
         return d;
     }
 
     private static volatile Object sDarkDispatcher;
-    private static volatile boolean sReInkFailed = false;
-
-    private static void logOnceReInk(String what, Throwable t) {
-        if (sReInkFailed) return;
-        sReInkFailed = true;
-        log("re-ink " + what + " FAILED: " + t);
-        XposedBridge.log(t);
-    }
-
-    /**
-     * One-shot diagnostic kept in so a future regression can be told apart from a theme change in
-     * a single log line.
-     */
-    private static void logCardState(View v, int color) {
-        long now = android.os.SystemClock.uptimeMillis();
-        if (sCardLogged && now - sLastCardLog < 2000) return;
-        sCardLogged = true;
-        sLastCardLog = now;
-        try {
-            android.graphics.drawable.Drawable d = v.getBackground();
-            int panelAlpha = -1;
-            try {
-                Object cc = XposedHelpers.getObjectField(v, "mCenterController");
-                if (cc != null) {
-                    Object a = XposedHelpers.callMethod(cc, "getPanelAlpha");
-                    if (a instanceof Number) panelAlpha = ((Number) a).intValue();
-                }
-            } catch (Throwable ignored) {
-            }
-            StringBuilder chain = new StringBuilder();
-            View p = v;
-            for (int i = 0; p != null && i < 8; i++) {
-                chain.append(String.format("%.2f", p.getAlpha())).append('<');
-                android.view.ViewParent vp = p.getParent();
-                p = (vp instanceof View) ? (View) p : null;
-            }
-            log("7 card state: arg=0x" + Integer.toHexString(color)
-                    + " bg=" + (d == null ? "null" : d.getClass().getSimpleName())
-                    + " bgAlpha=" + (d == null ? -1 : d.getAlpha())
-                    + " panelAlpha=" + panelAlpha + " alphaChain=" + chain);
-        } catch (Throwable t) {
-            log("7 card state FAILED: " + t);
-        }
-    }
 
     /**
      * Replay {@code setBlurBackground()} on every recorded card with the classic fill, and make sure
@@ -2346,12 +2186,7 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
                         }
                         sCardApplied.put(v, want);
                         replayed++;
-                    } catch (Throwable t) {
-                        if (!sCardReplayFailed) {
-                            sCardReplayFailed = true;
-                            log("7 card replay FAILED: " + t);
-                            XposedBridge.log(t);
-                        }
+                    } catch (Throwable ignored) {
                     }
                 }
                 if (white) {
@@ -2369,12 +2204,6 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
                     }
                 }
             }
-        }
-        long now = android.os.SystemClock.uptimeMillis();
-        if ((replayed > 0 || redrawn > 0) && now - sLastTintLog > 3000) {
-            sLastTintLog = now;
-            log("7 tint white=" + white + " replayed=" + replayed + "/" + attached
-                    + " repainted=" + redrawn);
         }
     }
 
@@ -2438,10 +2267,7 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
             hookMediaCardBuilder(card, "setBackground");
             hookMediaCardBuilder(card, "setBlurBgForLive");
             hookMediaCardBuilder(card, "setBlurBgForStatic");
-            log("7m hook MediaCarouseTransitionLayout.setBackground / setBlurBgForLive / setBlurBgForStatic");
-        } catch (Throwable t) {
-            log("7m media card hook FAILED: " + t);
-            XposedBridge.log(t);
+        } catch (Throwable ignored) {
         }
     }
 
@@ -2456,8 +2282,7 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
                     }
                 }
             });
-        } catch (Throwable t) {
-            log("7m no " + name + " on the media card: " + t);
+        } catch (Throwable ignored) {
         }
     }
 
@@ -2515,14 +2340,7 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
                 }
             }
             sMediaCardApplied.put(card, notificationFill());
-            if (!sMediaCardLogged) {
-                sMediaCardLogged = true;
-                log("7m media card fill 0x" + Integer.toHexString(notificationFill())
-                        + " (r=" + mediaCardRadiusPx(card) + "px)");
-            }
-        } catch (Throwable t) {
-            log("7m media card fill FAILED: " + t);
-            XposedBridge.log(t);
+        } catch (Throwable ignored) {
         } finally {
             sMediaFilling = false;
         }
@@ -2546,8 +2364,7 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
         try {
             // the vendor's own dispatcher: picks the blur variant again, or mNormalBg + media_bg_color
             XposedHelpers.callMethod(card, "setBackground");
-        } catch (Throwable t) {
-            log("7m media card restore FAILED: " + t);
+        } catch (Throwable ignored) {
         } finally {
             sMediaFilling = false;
         }
@@ -2584,11 +2401,6 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
         return v;
     }
 
-    /** True once the shift has been reported, for logging only. */
-    private static volatile boolean sShiftApplied = false;
-
-    private static volatile boolean sShiftLogged = false;
-
     /**
      * Track the header views and the tile views, so {@link #reInkForTheme} can re-run the vendor's own
      * colour pass on a day/night switch (see that method for why nothing else does it).
@@ -2607,9 +2419,7 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
                     }
                 }
             });
-            log("4a hook StatusBarHeaderView constructors");
-        } catch (Throwable t) {
-            log("4a header tracking FAILED: " + t);
+        } catch (Throwable ignored) {
         }
         try {
             Class<?> tile = XposedHelpers.findClass(
@@ -2628,9 +2438,7 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
                     }
                 }
             });
-            log("7t hook QSTileViewImpl constructors");
-        } catch (Throwable t) {
-            log("7t tile view tracking FAILED: " + t);
+        } catch (Throwable ignored) {
         }
     }
 
@@ -2657,7 +2465,6 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
                 syncHeaderIcons(param.thisObject);
             }
         });
-        log("hook " + label);
     }
 
     /** Copy the clock's current colour onto the header's icon buttons. */
@@ -2744,10 +2551,7 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
             XposedBridge.hookAllMethods(panel, "onFinishInflate", fix);
             XposedBridge.hookAllMethods(panel, "onConfigurationChanged", fix);
             hookFilterCloseButtonColor(cl);
-            log("8 hook NotificationFilterPanel colours");
-        } catch (Throwable t) {
-            log("8 NotificationFilterPanel not found");
-            XposedBridge.log(t);
+        } catch (Throwable ignored) {
         }
     }
 
@@ -2771,7 +2575,6 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
                 param.args[0] = sNightUi ? LIGHT_TINT : DARK_TINT;
             }
         });
-        log("8b hook CornerAlphaOptimizedImageButton.changeFilterColor");
     }
 
     /**
@@ -2827,20 +2630,10 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
                 iv.setColorFilter(ink);
                 iv.setImageTintList(android.content.res.ColorStateList.valueOf(ink));
             }
-            if (!sFilterPanelLogged) {
-                sFilterPanelLogged = true;
-                log("8 filter panel colours forced 0x"
-                        + Integer.toHexString(headerColor) + " tip=0x"
-                        + Integer.toHexString(tipColor) + " close=0x"
-                        + Integer.toHexString(ink));
-            }
-        } catch (Throwable t) {
-            log("8 applyFilterPanelColors FAILED");
-            XposedBridge.log(t);
+        } catch (Throwable ignored) {
         }
     }
 
-    private static volatile boolean sFilterPanelLogged = false;
     /** The live {@code close_filter_panel} view; see {@link #isFilterCloseButton}. */
     private static volatile android.widget.ImageView sFilterCloseBtn;
     /** The filter panel itself, so a theme switch can repaint it (see applyFilterPanelColors). */
@@ -2861,10 +2654,7 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
             };
             XposedBridge.hookAllMethods(empty, "updateColor", fix);
             XposedBridge.hookAllMethods(empty, "onFinishInflate", fix);
-            log("13 hook EmptyShadeView ink (empty_shade_text)");
-        } catch (Throwable t) {
-            log("13 EmptyShadeView not found");
-            XposedBridge.log(t);
+        } catch (Throwable ignored) {
         }
     }
 
@@ -2913,8 +2703,6 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
     /** Each chip's label view, cached: the ink is re-checked on every draw. */
     private static final Map<View, android.widget.TextView> sPrivacyChipLabels =
             new java.util.WeakHashMap<>();
-    /** Guards hook 10's one-shot log line. */
-    private static volatile boolean sPrivacyChipLogged = false;
 
 
     /**
@@ -2991,10 +2779,7 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
                     applyPrivacyChipInk(param.thisObject);
                 }
             });
-            log("10 hook FlymeOngoingPrivacyChip label ink");
-        } catch (Throwable t) {
-            log("10 FlymeOngoingPrivacyChip not found");
-            XposedBridge.log(t);
+        } catch (Throwable ignored) {
         }
     }
 
@@ -3036,13 +2821,7 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
             }
             text.setTextColor(DARK_TINT);
             sPrivacyChipInked.put(v, Boolean.TRUE);
-            if (!sPrivacyChipLogged) {
-                sPrivacyChipLogged = true;
-                log("10 privacy chip label forced 0x" + Integer.toHexString(DARK_TINT));
-            }
-        } catch (Throwable t) {
-            log("10 applyPrivacyChipInk FAILED");
-            XposedBridge.log(t);
+        } catch (Throwable ignored) {
         }
     }
 
@@ -3142,10 +2921,7 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
                     alignPrivacyChipRow(param.thisObject);
                 }
             });
-            log("11 hook NotificationPanelViewController.updatePadding (privacy chip row)");
-        } catch (Throwable t) {
-            log("11 NotificationPanelViewController#updatePadding not found");
-            XposedBridge.log(t);
+        } catch (Throwable ignored) {
         }
     }
 
@@ -3205,21 +2981,10 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
             }
 
             if (g.getPaddingStart() == left && g.getPaddingTop() == top) {
-                sChipRowLogged = true;
                 return;
             }
             g.setPaddingRelative(left, top, g.getPaddingEnd(), g.getPaddingBottom());
-            if (!sChipRowLogged) {
-                sChipRowLogged = true;
-                log("11 privacy chip row: start padding " + g.getPaddingStart() + "px, top "
-                        + g.getPaddingTop() + "px");
-            }
-        } catch (Throwable t) {
-            if (!sChipRowLogged) {
-                sChipRowLogged = true;
-                log("11 alignPrivacyChipRow FAILED");
-                XposedBridge.log(t);
-            }
+        } catch (Throwable ignored) {
         }
     }
 
@@ -3241,7 +3006,6 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
         if (idNotificationScroller == 0) {
             idNotificationScroller = panel.getResources()
                     .getIdentifier("notification_stack_scroller", "id", SYSUI);
-            if (idNotificationScroller == 0) log("11 missing id notification_stack_scroller");
         }
         if (idNotificationScroller != 0) {
             View v = panel.findViewById(idNotificationScroller);
@@ -3271,16 +3035,10 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
                     int ink = DARK_TINT;
                     param.args[0] = ink;
                     if (param.args.length > 1) param.args[1] = ink;
-                    if (!sTintLogged) {
-                        sTintLogged = true;
-                        log("5b QS icon tint forced 0x" + Integer.toHexString(ink));
-                    }
-                } catch (Throwable t) {
-                    XposedBridge.log(t);
+                } catch (Throwable ignored) {
                 }
             }
         });
-        log("5b hook TintedIconManager.setTint");
     }
 
     private static boolean insideCenterStatusBar(View v) {
@@ -3349,10 +3107,7 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
             // only when the vendor rewrites the margin.
             XposedBridge.hookAllMethods(qs, "updatePadding", fix);
             XposedBridge.hookAllMethods(qs, "updateWindowInsets", fix);
-            log("5c hook QSStatusBar landscape end margin");
-        } catch (Throwable t) {
-            log("5c QSStatusBar not found");
-            XposedBridge.log(t);
+        } catch (Throwable ignored) {
         }
     }
 
@@ -3378,10 +3133,7 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
             if (mlp.getMarginEnd() == want) return;
             mlp.setMarginEnd(want);
             icons.setLayoutParams(mlp);
-            log("5c QS status end margin -> " + want + "px (landscape=" + land
-                    + ", row paddingEnd=" + padEnd + ")");
-        } catch (Throwable t) {
-            XposedBridge.log(t);
+        } catch (Throwable ignored) {
         }
     }
 
@@ -3450,9 +3202,7 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
             //    classic_notification_shade, whose alpha the depth controller drives from the radius.
             //    There is no radius to scale there, so the layer is suppressed instead.
             hookClassicShadeBackdrop(cl);
-            log("9 hook shade blur (cap x" + CLASSIC_SHADE_BLUR_MAX_RATIO + ")");
-        } catch (Throwable t) {
-            log("9 shade blur hook failed: " + t);
+        } catch (Throwable ignored) {
         }
     }
 
@@ -3641,8 +3391,7 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
                     }
                 });
             }
-        } catch (Throwable t) {
-            log("9 RenderEffect hook failed: " + t);
+        } catch (Throwable ignored) {
         }
     }
 
@@ -3676,8 +3425,7 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
                     }
                 }
             });
-        } catch (Throwable t) {
-            log("9 classic shade backdrop hook failed: " + t);
+        } catch (Throwable ignored) {
         }
     }
 
@@ -3687,7 +3435,6 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
         if (sCoverInstalled && sCover != null && sCover.getParent() != null) return;
         View bg = root.findViewById(idCover);
         if (!(bg instanceof ViewGroup)) {
-            log("cover: keyguard_background_frame not found (0x" + Integer.toHexString(idCover) + ")");
             return;
         }
         ViewGroup frame = (ViewGroup) bg;
@@ -3707,7 +3454,6 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         sCoverScrim = scrimDrawable;
         sCoverScrimNight = sNightUi;
-        if (!blurred) log("cover: no blur behind, mask only");
         cover.setAlpha(0f);
         cover.setVisibility(View.INVISIBLE);
         cover.setClickable(false);
@@ -3717,7 +3463,6 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         sCover = cover;
         sCoverInstalled = true;
-        log("cover installed");
 
         // Poll instead of relying on callbacks: the shade can be opened by gestures, by the
         // notification panel, or by the control centre, and the cover has to follow all of them.
@@ -3729,8 +3474,7 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
             public void run() {
                 try {
                     applyCoverAlpha();
-                } catch (Throwable t) {
-                    XposedBridge.log(t);
+                } catch (Throwable ignored) {
                 }
                 // 60fps while the shade is moving (smoothness), idle otherwise (battery).  The
                 // lock screen's own pull-down runs on this tick too; its panel is settled most of
@@ -3760,7 +3504,6 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
         try {
             View mirror = root.findViewById(idWallpaperMirror);
             if (mirror == null) {
-                log("mirror blur: lock_wallpaper_mirror not found");
                 return;
             }
             if (mirror.getVisibility() != View.VISIBLE) return;
@@ -3770,9 +3513,7 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
             XposedHelpers.callMethod(inst, "setBackgroundBlurDrawableZAdjustment",
                     mirror, -1, false);
             sMirrorBlurred = true;
-            log("mirror blur applied (mode-0 path)");
-        } catch (Throwable t) {
-            log("mirror blur failed: " + t);
+        } catch (Throwable ignored) {
         }
     }
 
@@ -3782,7 +3523,6 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
                     cover.getContext().getClassLoader());
             Object inst = XposedHelpers.getStaticObjectField(mz, "INSTANCE");
             Object support = XposedHelpers.callMethod(inst, "isSupportControlBlur");
-            log("cover: isSupportControlBlur=" + support);
             if (Boolean.FALSE.equals(support)) return false;
             // View-level BackgroundBlurDrawable on the cover: unlike setting the shade window's
             // radius from outside (which the platform overwrites every frame), this one actually
@@ -3800,10 +3540,8 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
             Method m = XposedHelpers.findMethodExact(mz, "setBackgroundBlurDrawable",
                     View.class, int.class);
             m.invoke(inst, cover, radius);
-            log("cover: background blur drawable set radius=" + radius);
             return true;
-        } catch (Throwable t) {
-            log("cover: background blur failed: " + t);
+        } catch (Throwable ignored) {
             return false;
         }
     }
@@ -3822,10 +3560,8 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
             Method m = XposedHelpers.findMethodExact(mgrClass, "addBlurDrawableTo",
                     View.class, int.class, float.class);
             m.invoke(mgr, cover, COVER_COLOR, COVER_BLUR_RADIUS);
-            log("cover: wallpaper blur drawable applied");
             return true;
-        } catch (Throwable t) {
-            log("cover: blur drawable failed: " + t);
+        } catch (Throwable ignored) {
             return false;
         }
     }
@@ -4045,33 +3781,14 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
                     bar.setTranslationX(bar.getTranslationX() + addX);
                     float addY = dpToWrittenPx(bar.getResources(), BRIGHTNESS_MIRROR_OFFSET_Y_DP);
                     bar.setTranslationY(bar.getTranslationY() + addY);
-                    if (!sMirrorLogged) {
-                        sMirrorLogged = true;
-                        StringBuilder sb = new StringBuilder("9 brightness mirror: children=");
-                        sb.append(bar.getChildCount()).append(" bar=").append(bar.getWidth())
-                          .append("x").append(bar.getHeight())
-                          .append(" pad=").append(bar.getPaddingLeft()).append(',').append(bar.getPaddingTop())
-                          .append(" x+=").append(addX).append(" y+=").append(addY);
-                        for (int i = 0; i < bar.getChildCount(); i++) {
-                            View c = bar.getChildAt(i);
-                            sb.append(" | child").append(i).append(' ')
-                              .append(c.getClass().getSimpleName()).append(' ')
-                              .append(c.getWidth()).append('x').append(c.getHeight())
-                              .append(" scale=").append(c.getScaleX()).append(',').append(c.getScaleY());
-                        }
-                        log(sb.toString());
-                    }
-                } catch (Throwable t) {
-                    XposedBridge.log(t);
+                } catch (Throwable ignored) {
                 }
             }
         };
-        int n = 0;
         try {
             Class<?> c = XposedHelpers.findClass(
                     "com.android.systemui.statusbar.policy.BrightnessMirrorController", cl);
             XposedBridge.hookAllMethods(c, "setLocationAndSize", fix);
-            n++;
         } catch (Throwable ignored) {
         }
         try {
@@ -4079,7 +3796,6 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
                     "com.android.systemui.settings.brightness.ui.viewModel.BrightnessMirrorViewModel", cl);
             // this variant keeps neither the mirror nor its id field: read the view from the
             // LocationAndSize flow target instead -- not reachable, so it is left alone.
-            log("9 BrightnessMirrorViewModel present (legacy controller still wired on this build)");
             XposedBridge.hookAllMethods(c2, "setLocationAndSize", new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {
@@ -4098,7 +3814,6 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
             });
         } catch (Throwable ignored) {
         }
-        log("9 hook BrightnessMirror setLocationAndSize (" + n + " controller)");
     }
 
     /**
@@ -4124,9 +3839,6 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {
                     sBrightnessMirrorUp = true;
-                    sMirrorBlurLogged = false;
-                    sMirrorWindowBlurLogged = false;
-                    log("9 brightness mirror shown: backdrop blur -> " + MIRROR_BLUR_PX + "px");
                     try {
                         applyCoverAlpha();
                     } catch (Throwable ignored) {
@@ -4137,9 +3849,6 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {
                     sBrightnessMirrorUp = false;
-                    sMirrorBlurLogged = false;
-                    sMirrorWindowBlurLogged = false;
-                    log("9 brightness mirror hidden: backdrop blur restored");
                     try {
                         applyCoverAlpha();
                     } catch (Throwable ignored) {
@@ -4148,9 +3857,7 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
             };
             XposedBridge.hookAllMethods(c, "showMirror", show);
             XposedBridge.hookAllMethods(c, "hideMirror", hide);
-            log("9 hook BrightnessMirror blur suppression");
-        } catch (Throwable t) {
-            log("9 brightness mirror blur hook failed: " + t);
+        } catch (Throwable ignored) {
         }
         hookShadeWindowBlurPush(cl);
     }
@@ -4193,24 +3900,15 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
                         if (param.args.length < 2 || !(param.args[1] instanceof Integer)) return;
                         if (!isShadeViewRoot(param.args[0])) return;
                         if (((Integer) param.args[1]).intValue() == MIRROR_BLUR_PX) return;
-                        if (!sMirrorWindowBlurLogged) {
-                            sMirrorWindowBlurLogged = true;
-                            log("9 mirror page: shade window blur "
-                                    + param.args[1] + "px -> " + MIRROR_BLUR_PX + "px");
-                        }
                         param.args[1] = Integer.valueOf(MIRROR_BLUR_PX);
                     } catch (Throwable ignored) {
                     }
                 }
             });
-            log("9 hook BlurUtils.applyBlur (shade window blur kill)");
-        } catch (Throwable t) {
-            log("9 shade blur push hook failed: " + t);
+        } catch (Throwable ignored) {
         }
     }
 
-    /** Guards {@link #hookShadeWindowBlurPush}'s one-shot log line. */
-    private static volatile boolean sMirrorWindowBlurLogged = false;
 
     /**
      * Is this ViewRootImpl the shade window's -- i.e. the one the module's cover is drawn into?  Used
@@ -4224,7 +3922,7 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
         if (root == null) return false;
         try {
             return XposedHelpers.callMethod(root, "getViewRootImpl") == viewRootImpl;
-        } catch (Throwable t) {
+        } catch (Throwable ignored) {
             return false;
         }
     }
@@ -4276,13 +3974,7 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
                             }
                         });
             }
-            if (!sMirrorCornerLogged) {
-                sMirrorCornerLogged = true;
-                log("9 brightness mirror corner: r=" + mirrorCornerRadius(bar, card)
-                        + "px outline + clip (like the control-centre card)");
-            }
-        } catch (Throwable t) {
-            XposedBridge.log(t);
+        } catch (Throwable ignored) {
         }
     }
 
@@ -4305,7 +3997,6 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
     /** Cards already given the bar corner treatment (weak keys; see {@link #applyMirrorCorner}). */
     private static final java.util.Set<View> sMirrorCornerDone =
             java.util.Collections.newSetFromMap(new java.util.WeakHashMap<View, Boolean>());
-    private static volatile boolean sMirrorCornerLogged = false;
 
     private static void setTextSizePx(Object tv, float px) {
         if (tv instanceof android.widget.TextView) {
@@ -4402,8 +4093,7 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
                     slider.getContext().getClassLoader());
             XposedHelpers.callStaticMethod(utils, "setViewSmoothCorner", slider, radius);
             sSliderRadius.put(slider, radius);
-        } catch (Throwable t) {
-            XposedBridge.log(t);
+        } catch (Throwable ignored) {
         }
     }
     private static Object sShadeWindowCtrl;
@@ -4418,8 +4108,7 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
             Object inst = XposedHelpers.callStaticMethod(dep, "get", cls);
             if (inst != null) sShadeWindowCtrl = inst;
             return inst;
-        } catch (Throwable t) {
-            log("shade window controller unavailable: " + t);
+        } catch (Throwable ignored) {
             return null;
         }
     }
@@ -4490,7 +4179,6 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
         if (sFilterPanel != null && sFilterPanelNight != sNightUi) {
             // The intercepted-notification box keeps the colour it was last given -- its own pass does
             // not run on a theme switch -- so it is repainted here, the same way the scrim is.
-            log("8 filter panel repainted for night=" + sNightUi);
             applyFilterPanelColors(sFilterPanel);
         }
         if (!sPrivacyChips.isEmpty()) {
@@ -4503,7 +4191,6 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
         if (sCoverScrim != null && sCoverScrimNight != sNightUi) {
             sCoverScrimNight = sNightUi;
             sCoverScrim.setColor(coverScrimColor());
-            log("cover scrim repainted 0x" + Integer.toHexString(coverScrimColor()));
         }
         Object mgr = sManager;
         float value = -1f;
@@ -4519,11 +4206,7 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
                 qsFlow = flowFloat(si, "getQsExpansion");
                 value = Math.max(anyFlow, shadeFlow);
                 value = Math.max(value, qsFlow);
-            } catch (Throwable t) {
-                if (!sExpansionLogged) {
-                    sExpansionLogged = true;
-                    log("shade interactor unavailable: " + t);
-                }
+            } catch (Throwable ignored) {
             }
         }
         Object npvc = sPanelController;
@@ -4592,7 +4275,6 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
             if (sCcContent != null && sCcContent.getTranslationY() != 0f) {
                 sCcContent.setTranslationY(0f);
             }
-            log("unlock: lock-screen CC clip/translation released");
         }
         if (kg) {   // the lock screen never shows the module's cover/mask
             cover.setVisibility(View.INVISIBLE);
@@ -4633,11 +4315,6 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
             driveCoverBlur(cover);
             driveCoverBlurAlpha(cover, 255);
             driveShadeWindowBlur();
-            long t0 = android.os.SystemClock.uptimeMillis();
-            if (t0 - sLastAlphaLog > 1500) {
-                sLastAlphaLog = t0;
-                log("keyguard idle: cover released, wallpaper layers restored");
-            }
             return;
         }
         boolean open = a > 0.005f;   // the veil is up as soon as the shade has really moved
@@ -4670,13 +4347,6 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
         driveCoverBlur(cover);
         driveCoverBlurAlpha(cover, mirrorPage ? MIRROR_BLUR_ALPHA : 255);
         driveShadeWindowBlur();
-        if (mirrorPage && !sMirrorBlurLogged) {
-            sMirrorBlurLogged = true;
-            log("9 mirror page: backdrop blur forced to " + sCoverBlurPx + "px/alpha "
-                    + sCoverBlurAlphaPx + " (window " + wantShadeBlurPx() + "px)");
-        } else if (!mirrorPage) {
-            sMirrorBlurLogged = false;
-        }
         // Hide the wallpaper layers from the very first frame of the pull-down, otherwise the
         // animation still shows the wallpaper (see hideWallpaperLayers).
         ViewGroup shadeRoot = cover.getRootView() instanceof ViewGroup
@@ -4701,16 +4371,6 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
             // vendor rebuilds it on every media / live-notification change, so it is re-applied
             // here as well, on the same "veil is up" gate the rows use.
             applyMediaCardTint(mediaCard(shadeRoot), open);
-        }
-        long now = android.os.SystemClock.uptimeMillis();
-        if (now - sLastAlphaLog > 1500) {
-            sLastAlphaLog = now;
-            log("gate panel=" + panel + " h=" + panelH + " max=" + maxPanelH
-                    + " flows=" + value + " anyExpanded=" + anyExpanded + " keyguard=" + kg
-                    + " -> " + a + " blur=" + sCoverBlurPx + "px"
-                    + " coverA=" + cover.getAlpha() + " vis=" + cover.getVisibility()
-                    + " scrimA=" + (android.graphics.Color.alpha(coverScrimColor())
-                    * Math.round(255f * cover.getAlpha()) / 255));
         }
     }
 
@@ -4911,9 +4571,6 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
     private static volatile boolean sCcIdleClipped = false;
     /** Reused clip rectangle for the CC panel's reveal (setClipBounds copies it). */
     private static volatile android.graphics.Rect sCcClipRect;
-    /** Last reveal height handed to the CC panel; only used for the log line. */
-    private static volatile float sLockReveal = -1f;
-    private static volatile boolean sLockPullLogged = false;
     /** Last expanded height seen, and when it last moved -- the poll rate follows this. */
     private static volatile float sLockLastH = -1f;
     private static volatile long sLockLastMove = 0L;
@@ -4945,7 +4602,7 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
             android.os.PowerManager pm = (android.os.PowerManager)
                     v.getContext().getSystemService(android.content.Context.POWER_SERVICE);
             return pm == null || pm.isInteractive();
-        } catch (Throwable t) {
+        } catch (Throwable ignored) {
             return true;
         }
     }
@@ -4978,7 +4635,7 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
         try {
             return c.getResources().getConfiguration().orientation
                     != android.content.res.Configuration.ORIENTATION_LANDSCAPE;
-        } catch (Throwable t) {
+        } catch (Throwable ignored) {
             return true;
         }
     }
@@ -5014,8 +4671,7 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
                 if (qs instanceof View) sCcQs = (View) qs;
                 Object header = XposedHelpers.getObjectField(center, "mHeader");
                 if (header instanceof View) sCcHeader = (View) header;
-            } catch (Throwable t) {
-                log("lock pull: CC views unavailable: " + t);
+            } catch (Throwable ignored) {
                 return false;
             }
             if (sCcPanel != null) {
@@ -5110,7 +4766,6 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
 
         // --- the module's white veil, behind the content ---
         sLockPullOn = true;
-        sLockReveal = push;
         cover.setVisibility(View.VISIBLE);
         float a = Math.max(veil, COVER_MIN_ALPHA);
         if (cover.getAlpha() != a) cover.setAlpha(a);
@@ -5122,13 +4777,6 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
         driveCoverBlurAlpha(cover, 255);
         driveShadeWindowBlur();
 
-        if (!sLockPullLogged) {
-            sLockPullLogged = true;
-            log("lock pull: classic transition engaged (H=" + H + " clockEnd=" + Math.round(clockEnd)
-                    + " barsEnd=" + Math.round(barsEnd) + " veil=" + Math.round(veilStart) + ".."
-                    + Math.round(veilFull) + " cc=" + Math.round(ccStart) + " padlock="
-                    + (sLockLockIcon != null ? "fading with the clock" : "NOT FOUND") + ")");
-        }
         return true;
     }
 
@@ -5254,8 +4902,6 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
     private static void endClassicLockPull(View cover, Object center) {
         sLockPullOn = false;
         sCcIdleClipped = false;
-        sLockReveal = -1f;
-        sLockPullLogged = false;
         // Keep re-asserting the lock screen's own values for a moment: the vendor's occlusion
         // transition finishes its fade after the panel is gone (see sLockRestoreUntil).
         if (keyguardShowing() && lockPortrait()) {
@@ -5312,7 +4958,6 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
             sMaskAlpha = 0f;
             driveCoverBlur(cover);
         }
-        log("lock pull: classic transition released");
     }
 
     /**
@@ -5339,7 +4984,6 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
                     }
                 }
             });
-            log("12a hook NotificationPanelViewController.onControlCenterBlurChanged");
 
             Class<?> center = XposedHelpers.findClass(
                     "com.flyme.systemui.controlcenter.phone.CenterController", cl);
@@ -5361,7 +5005,6 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
                     }
                 }
             });
-            log("12b hook CenterController setAnimationAlpha/Scale/CollapseTranslation");
 
             // The panel is made visible by the same call that expands it, one frame before this
             // module's poller would clip it; clipping it in the same call keeps a whole unclipped
@@ -5413,7 +5056,6 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
                     }
                 }
             });
-            log("12e hook CenterController setExpandedHeightInternal (synchronous clip)");
 
             Class<?> qsAnimator = XposedHelpers.findClass(
                     "com.flyme.systemui.controlcenter.qs.MzQsAnimator", cl);
@@ -5425,7 +5067,6 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
                     }
                 }
             });
-            log("12c hook MzQsAnimator.setQSTranslationY");
 
             // Record the finger's y while the CC's TouchHandler runs, so the height rewrite above
             // can turn the vendor's compressed close into a 1:1 one.
@@ -5439,7 +5080,7 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
                             android.view.MotionEvent ev = (android.view.MotionEvent) param.args[1];
                             sTouchY = ev.getActionMasked() == android.view.MotionEvent.ACTION_MOVE
                                     ? ev.getY() : -1f;
-                        } catch (Throwable t) {
+                        } catch (Throwable ignored) {
                             sTouchY = -1f;
                         }
                     }
@@ -5449,9 +5090,7 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
                         sTouchY = -1f;
                     }
                 });
-                log("12f hook CenterController$TouchHandler.onTouch");
-            } catch (Throwable t) {
-                log("12f TouchHandler hook failed: " + t);
+            } catch (Throwable ignored) {
             }
 
             // The collapse fling starts from 10% of the panel height, not from where the finger let
@@ -5491,7 +5130,6 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
                     }
                 }
             });
-            log("12g hook CenterController.createHeightAnimator (collapse from the finger's height)");
 
             Class<?> scrimView = XposedHelpers.findClass("com.android.systemui.scrim.ScrimView", cl);
             XposedBridge.hookAllMethods(scrimView, "setViewAlpha", new XC_MethodHook() {
@@ -5503,9 +5141,7 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
                     }
                 }
             });
-            log("12d hook ScrimView.setViewAlpha (CC plate)");
-        } catch (Throwable t) {
-            log("12 classic lock pull hooks failed: " + t);
+        } catch (Throwable ignored) {
         }
     }
 
@@ -5535,11 +5171,7 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
             }
             Object v = XposedHelpers.callMethod(inst, "isShowing");
             return Boolean.TRUE.equals(v);
-        } catch (Throwable t) {
-            if (!sKgLogged) {
-                sKgLogged = true;
-                log("keyguard state unavailable: " + t);
-            }
+        } catch (Throwable ignored) {
             return false;
         }
     }
@@ -5588,7 +5220,6 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
         if (!(panel instanceof ViewGroup)) return;
         View sliderWrapper = panel.findViewById(idSliderWrapper);
         if (sliderWrapper == null) {
-            log("6 slider_wrapper not found (0x" + Integer.toHexString(idSliderWrapper) + ")");
             return;
         }
         float radius = qsCardRadiusPx(panel);
@@ -5605,9 +5236,6 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
         View connectivity = panel.findViewById(idConnectivityTilesWrapper);
         registerQsCard(sliderWrapper, radius);
         registerQsCard(connectivity, radius);
-        log("6 qs cards applied 0x"
-                + Integer.toHexString(sNightUi ? cardColor() : notificationFill())
-                + " r=" + radius + " (" + qsCardCount() + " cards registered)");
     }
 
     /** Register one control-centre card, and the radius it is drawn with, for the theme repaint. */
@@ -5627,18 +5255,6 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
             sQsCards.add(new java.lang.ref.WeakReference<>(card));
         }
         applyQsCardFill(card, radius, true);
-    }
-
-    /** Live cards in {@link #sQsCards} (drops the collected refs; used by the log line and the poll). */
-    private static int qsCardCount() {
-        int n = 0;
-        synchronized (sQsCards) {
-            for (java.util.Iterator<java.lang.ref.WeakReference<View>> it = sQsCards.iterator();
-                    it.hasNext(); ) {
-                if (it.next().get() == null) it.remove(); else n++;
-            }
-        }
-        return n;
     }
 
     /** The corner radius the control centre's two cards are drawn with ({@code qs_corner_radius}). */
@@ -5681,10 +5297,6 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
                         : radius.floatValue(), classic);
             }
         }
-    }
-
-    private static void log(String msg) {
-        XposedBridge.log(TAG + msg);
     }
 
     /* ------------------- media row + tile grid (rotation) ------------------- */
