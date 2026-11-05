@@ -48,10 +48,15 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
  *      centre ({@code control_center_view}) are two layouts, both of which inflate an MzQSPanel
  *   7  NotificationBackgroundView#onDraw / #setBlurBackground /
  *      #setDrawableAlpha / #updateLiveBlurAlpha / #setRadius,
- *      ActivatableNotificationView#setBackground                 opaque white notification cards
+ *      ActivatableNotificationView#setBackground,
+ *      ObjectAnimator#ofFloat / PropertyValuesHolder#ofFloat (the "alpha" ones the row's
+ *      appear animation builds)                                      opaque white notification cards
+ *      (those factories clamp the row's alpha to the card fill's own alpha, see
+ *      hookNotificationCardTint)
  *   7m MediaCarouseTransitionLayout#setBackground / #setBlurBgForLive / #setBlurBgForStatic
- *      (+ its id/media_mask_bg artwork layer)                     the media player card, same
- *      opaque white as a notification row (its own surface is built outside the row view classes)
+ *      (+ each card's id/media_mask_bg artwork layer)              every media player card in the
+ *      carousel, same opaque white as a notification row (its own surface is built outside the row
+ *      view classes; one card exists per open media session -- see applyMediaCardTints)
  *   8  NotificationFilterPanel#updateColors / #updateHeaderMarginTop /
  *      #onFinishInflate / #onConfigurationChanged                 dark colours in the
  *      "intercepted notifications" box (the inbox button in the shade header)
@@ -162,8 +167,9 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
      */
     private static final float COVER_BLUR_RATIO = 0.2f;    // visible layer: 0.2 x max_window_blur_radius, ramped
     /**
-     * Fraction of the pull at which the backdrop blur has reached its full radius: the blur ramps
-     * with the RAW drag from the very first pixel and is done at a fifth of a pull (639px here).
+     * Fraction of the pull at which the backdrop blur has reached its full radius, and the point
+     * where the white mask's fade-in is triggered: the blur ramps with the RAW drag from the very
+     * first pixel and is done at 0.0698 of a pull (223px here).
      *
      * <p>Why a ramp at all (measured, see work/blur_ramp_fix.md).  The blur that is visible on this
      * build is the shade window's blur-of-behind, and the strongest contributor to it is the
@@ -175,16 +181,14 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
      * step, and starting the cover (and therefore its blur region) on the first frame of the pull
      * keeps the blur growing from 0 instead of appearing.
      *
-     * <p>0.2 because the blur has to be well up by the time the white veil starts (1% of a pull,
-     * 32px): at 240px of travel the radius is already 76 x 0.073/0.2 = 28px, so the backdrop is
-     * visibly blurred before the veil arrives, and from 639px on it is the same full radius it always
-     * had.  The veil runs faster (full at 223px, {@link #COVER_MASK_FULL_AT}), so the white is up
-     * first and the blur keeps sharpening underneath it.
+     * <p>0.0698 so the blur is fully up exactly when the white veil starts: the veil is triggered at
+     * the same expansion ({@link #COVER_MASK_START_AT}, 223px), so the backdrop sharpens under the
+     * drag and then the white fades in over a backdrop that is no longer changing.
      */
-    private static final float COVER_BLUR_FULL_AT = 0.2f;
+    private static final float COVER_BLUR_FULL_AT = 0.0695f;
     /**
-     * Alpha the cover keeps while the pull-down is in progress, even though the white mask is not due
-     * yet ({@link #COVER_MIN_EXPANSION}, 1% of a pull = 32px).
+     * Alpha the cover keeps while the pull-down is in progress, before the white mask's fade-in is
+     * triggered ({@link #COVER_MASK_START_AT}, 223px).
      *
      * <p>SurfaceFlinger reports the cover's blur region the whole time (the {@code blurRegions} entry
      * is there from the first frames, with the ramped radius), but a layer that is <em>completely</em>
@@ -278,25 +282,26 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
     private static final int FILTER_PANEL_TEXT_COLOR = HEADER_TEXT_COLOR;
     /** Notification card fill (old Flyme: near white over the blurred wallpaper). */
     /**
-     * Shade expansion below which the cover/white mask stays completely off -- and, because the
-     * mask ramp is a straight line from here to {@link #COVER_MASK_FULL_AT}, also the start of that
-     * ramp.  0.01 of the shade window is 32px on this device (3192px tall), i.e. the first ~1% of a
-     * full pull shows no white at all.
-     */
-    private static final float COVER_MIN_EXPANSION = 0.069f;
-    /**
-     * Expansion at which the white mask reaches full strength.  The ramp is the straight line
-     * {@code (drive - COVER_MIN_EXPANSION) / (COVER_MASK_FULL_AT - COVER_MIN_EXPANSION)}: invisible
-     * below 1% of a full pull (32px), full white at 7% (223px here), 1 after that.  With the blur
-     * following its own (slower) ramp to 20%, the white is therefore fully up well before the blur
-     * finishes: the pull reads as "white plate with the backdrop still sharpening underneath".
+     * Expansion at which the white mask's fade changes direction: at or above it (0.0699, about
+     * 223px on this device) a {@link #COVER_MASK_FADE_MS}-based fade-in starts, below it the
+     * fade-out starts.  The veil stays completely off while the shade is closed.
      *
-     * <p>Why the raw expansion cannot be the alpha: {@code getExpandedFraction()} is
-     * {@code mExpandedHeight / getMaxPanelHeight()}, and on this build that denominator is the whole
-     * shade window (3192px) while the panel only comes to rest at 1386px (0.43) -- a plain
-     * {@code alpha = fraction} would leave the veil at 43% when the panel has already settled.
+     * <p>Why the raw expansion is only the trigger and not the alpha: {@code getExpandedFraction()}
+     * is {@code mExpandedHeight / getMaxPanelHeight()}, and on this build that denominator is the
+     * whole shade window (3192px) while the panel only comes to rest at 1386px (0.43) -- a plain
+     * {@code alpha = fraction} would leave the veil at 43% when the panel has already settled.  The
+     * fade is therefore timed from the clock, not scaled by the drag.
      */
-    private static final float COVER_MASK_FULL_AT = 0.0698f;
+    private static final float COVER_MASK_START_AT = 0.0699f;
+    /**
+     * Base duration of a full 0 -> 1 white mask fade, in milliseconds, <em>before</em> the system's
+     * animator duration scale.  The actual tween is
+     * {@code COVER_MASK_FADE_MS x animatorDurationScale() x |to - from|}, so it follows Developer
+     * options -> "Animator duration scale" (and the "Remove animations" accessibility switch: a
+     * scale of 0 makes the mask switch instantly).  A mid-fade reversal runs at the same
+     * alpha-per-ms rate, so reversing after half the fade takes half the duration.
+     */
+    private static final long COVER_MASK_FADE_MS = 150L;
     /** Landscape shade header metrics taken from the old Flyme 9.2 header. */
     private static final float LS_CLOCK_DP = 35f;
     private static final float LS_DATE_DP = 10f;
@@ -663,6 +668,7 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
     private static int idMiscTileWrapper = 0x7f0a066c;  // id/misc_tile_wrapper
     private static int idMediaWrapper = 0x7f0a064e;     // id/media_tile_wrapper
     private static int idMediaControls = 0x7f0a0876;    // id/qs_media_controls (the media player card)
+    private static int idMediaCarousel = 0x7f0a0629;    // id/media_carousel (the cards' container)
     private static int idMediaMaskBg = 0x7f0a0638;      // id/media_mask_bg (its blurred-artwork layer)
     private static int idMiscWrapper = 0x7f0a066d;      // id/misc_wrapper
     private static int idCustomTileArea = 0x7f0a02c4;  // id/custom_tile_area
@@ -758,21 +764,45 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
      */
     private static final ThreadLocal<Integer> sTileCtorDepth = new ThreadLocal<>();
     /**
-     * Media-card tint state: the module's own fill per player card, the colour it carries, the
-     * vendor artwork lifted off the card's mask layer, and the card view itself.
+     * Media-card tint state: the module's own fill per player card, the colour it carries and the
+     * vendor artwork lifted off each card's mask layer.
      *
      * <p>Same shape as the row state above ({@link #sCardFillColor} / {@link #sCardApplied}) and for
      * the same reason: the vendor rebuilds the surface on every media/mode change, so the fill is
      * re-applied by both a hook on the builder and the shade poller, and both need to recognise
      * "this card is already ours" without comparing drawables it cannot see.
+     *
+     * <p>Everything is keyed by <em>view</em> on purpose: the carousel keeps one
+     * {@code MediaCarouseTransitionLayout} per media session -- see {@link #applyMediaCardTints} --
+     * so both sessions have to be tinted independently.
      */
     private static final Map<View, ClassicCardFill> sMediaCardFill = new java.util.WeakHashMap<>();
     private static final Map<View, Integer> sMediaCardApplied = new java.util.WeakHashMap<>();
     private static final Map<View, android.graphics.drawable.Drawable> sMediaMaskArt =
             new java.util.WeakHashMap<>();
-    private static java.lang.ref.WeakReference<View> sMediaCard =
+    /**
+     * Scrim alpha each media card's display list was last <em>recorded</em> with.
+     *
+     * <p>{@link ClassicCardFill#draw} lays the cover's scrim back down inside the card before the
+     * translucent white, so the recorded list carries the cover's alpha at record time.  During a
+     * pull the cover ramps 0 -&gt; 1: a card that becomes visible early in the pull records a thin
+     * scrim, and after the panel settles at full alpha its display list is never re-recorded, so the
+     * card reads as grey/transparent against the white notification rows.  This is the same bug the
+     * rows had and fixed via {@link #sCardScrim} -- a slow pull into the control centre (the
+     * {@code input motionevent DOWN/MOVE/MOVE/UP} reproduction) is the easiest trigger, because the
+     * media card is drawn before the white mask has finished ramping.  Written by
+     * {@link ClassicCardFill#draw} through the drawable's owner, compared by
+     * {@link #applyMediaCardTint}.
+     */
+    private static final Map<View, Integer> sMediaCardScrim = new java.util.WeakHashMap<>();
+    /**
+     * The carousel's {@code media_carousel} container (the {@code LinearLayout} whose children are
+     * the per-session cards), cached.  Walking its children is what reaches the second and later
+     * cards; a single {@code findViewById(qs_media_controls)} only ever returns the first one.
+     */
+    private static java.lang.ref.WeakReference<ViewGroup> sMediaContent =
             new java.lang.ref.WeakReference<>(null);
-    /** Guards the re-entrancy of our own {@code setBackground()} call on the media card. */
+    /** Guards the re-entrancy of our own {@code setBackground()} call on a media card. */
     private static volatile boolean sMediaFilling = false;
     private static volatile Object sManager;
     private static volatile Object sPanelController;
@@ -784,6 +814,13 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
     private static volatile float sBlurDrive = 0f;
     /** The mask alpha applyCoverAlpha() last put on the cover -- frames the blur strength. */
     private static volatile float sMaskAlpha = 0f;
+    /** uptimeMillis when the current white-mask tween started; 0 = no tween running. */
+    private static volatile long sMaskFadeStart = 0L;
+    /** Alpha the current tween started from, and the alpha it is heading to (0 or 1). */
+    private static volatile float sMaskFadeFrom = 0f;
+    private static volatile float sMaskFadeTo = 0f;
+    /** Duration of the current tween, ms.  Shorter than COVER_MASK_FADE_MS after a mid-fade reversal. */
+    private static volatile long sMaskFadeMs = 0L;
     /** {@code dimen/status_bar_headerview_height}, the height both control centres' headers want. */
     private static int idHeaderHeight = 0x7f07112d;
     private static volatile ClassLoader sClassLoader;
@@ -898,6 +935,8 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
             if (v != 0) idMediaWrapper = v;
             v = res.getIdentifier("qs_media_controls", "id", SYSUI);
             if (v != 0) idMediaControls = v;
+            v = res.getIdentifier("media_carousel", "id", SYSUI);
+            if (v != 0) idMediaCarousel = v;
             v = res.getIdentifier("media_mask_bg", "id", SYSUI);
             if (v != 0) idMediaMaskBg = v;
             v = res.getIdentifier("misc_tile_wrapper", "id", SYSUI);
@@ -1071,6 +1110,18 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
     /** The notification row's own fill. */
     private static int notificationFill() {
         return sNightUi ? CARD_BG_COLOR_NIGHT : CARD_BG_COLOR;
+    }
+
+    /**
+     * The card fill's own alpha, as the row-level floor of the appear / dismiss animations.
+     *
+     * <p>The fill is {@code 0xDD} white, so the floor is {@code 0xDD / 0xFF} = 221 / 255 =
+     * 0.8666667: the card is allowed to fade, but never below the translucency it paints with
+     * anyway.  Derived from {@link #CARD_BG_COLOR} rather than written as a constant, so changing
+     * the fill moves the animation's floor with it.
+     */
+    private static float cardFillAlpha() {
+        return android.graphics.Color.alpha(notificationFill()) / 255f;
     }
 
     /** The veil painted over the blurred backdrop. */
@@ -1478,6 +1529,13 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
      *       the shade animation.</li>
      *   <li>{@code ActivatableNotificationView.setBackground} -- re-applies the recolour whenever
      *       the vendor re-creates the drawable (attach, media state, new notification).</li>
+     *   <li>{@code ObjectAnimator#ofFloat} / {@code PropertyValuesHolder#ofFloat} -- when the call
+     *       comes from {@code ActivatableNotificationView.updateAppearAnimationScale}, the "alpha"
+     *       values of the row's arrival pop and of its dismissal are clamped to the card fill's own
+     *       alpha: the pop starts at {@code 0xDD / 0xFF} = 0.8667 instead of 0, and the dismissal
+     *       ends there instead of 0.  The classic card punches the plate out from under itself, and
+     *       a row more transparent than the fill turns that punch into a window onto the backdrop
+     *       blur; the scale animation is left exactly as the vendor builds it.</li>
      * </ul>
      */
     private static void hookNotificationCardTint(ClassLoader cl) {
@@ -1583,6 +1641,63 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
                     if (sShadeOpen && !sRowThemeRefresh) applyCardTint(true);
                 }
             });
+
+            // The vendor's pop and dismissal animate the row's alpha from inside
+            // ActivatableNotificationView#updateAppearAnimationScale:
+            //   arrival    ObjectAnimator.ofFloat(row, "alpha", 0f, 1f)          over 260 ms
+            //   dismissal  PropertyValuesHolder.ofFloat("alpha", 1f, 0f)         over 260 ms,
+            //              wrapped into an AnimatorSet with the 1 -> 0.6 scale over 600 ms.
+            // The classic card must never be more transparent than its own fill (see
+            // ClassicCardFill): it punches the plate out from under itself, and a CLEAR op is
+            // replayed at full strength while the white above it is scaled by the row's alpha, so
+            // a row that fades further than the fill lets the punch become a window onto the
+            // backdrop blur (报告: 来新通知时, 弹出通知的动画中卡片没有染色 / 关闭通知的动画中卡片没有
+            // 染色).  The floor is exactly the fill's own alpha -- the top byte of CARD_BG_COLOR,
+            // 0xDD, over 0xFF = 221 / 255 = 0.8667 -- so the pop starts at that alpha instead of 0
+            // and the dismissal ends at it instead of 0.
+            //
+            // The two animator factories are watched instead of the method: when the call really
+            // comes from updateAppearAnimationScale and the property is "alpha", that one value is
+            // clamped.  Everything else the vendor builds there -- the scale animation, its
+            // interpolator, the animator set, the alpha animator's own timing and its listener --
+            // is left exactly as it is, and so is every other call of these factories in the
+            // process.
+            XposedBridge.hookAllMethods(android.animation.ObjectAnimator.class, "ofFloat",
+                    new XC_MethodHook() {
+                @Override
+                protected void beforeHookedMethod(MethodHookParam param) {
+                    if (!sShadeOpen || sNightUi) return;
+                    if (param.args.length < 3 || !(param.args[1] instanceof String)
+                            || !param.args[1].equals("alpha") || !fromAppearAnimationScale()) {
+                        return;
+                    }
+                    // The start value of the pop: 0 -> 1 becomes cardFillAlpha() -> 1.
+                    Object values = param.args[2];
+                    if (values instanceof float[]) {
+                        float[] f = (float[]) values;
+                        if (f.length > 0) f[0] = cardFillAlpha();
+                    } else if (values instanceof Float) {
+                        param.args[2] = Float.valueOf(cardFillAlpha());
+                    }
+                }
+            });
+            XposedBridge.hookAllMethods(android.animation.PropertyValuesHolder.class, "ofFloat",
+                    new XC_MethodHook() {
+                @Override
+                protected void beforeHookedMethod(MethodHookParam param) {
+                    if (!sShadeOpen || sNightUi) return;
+                    if (param.args.length < 2 || !(param.args[0] instanceof String)
+                            || !param.args[0].equals("alpha") || !fromAppearAnimationScale()) {
+                        return;
+                    }
+                    // The end value of the dismissal: 1 -> 0 becomes 1 -> cardFillAlpha().
+                    Object values = param.args[1];
+                    if (values instanceof float[]) {
+                        float[] f = (float[]) values;
+                        if (f.length >= 2) f[f.length - 1] = cardFillAlpha();
+                    }
+                }
+            });
         } catch (Throwable ignored) {
         }
     }
@@ -1601,6 +1716,30 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
     }
 
     /**
+     * True when the current call is being made from the vendor's
+     * {@code ActivatableNotificationView#updateAppearAnimationScale(boolean)} -- the method that
+     * builds the row's pop and dismissal animators.
+     *
+     * <p>Used by the animator-factory hooks in {@link #hookNotificationCardTint}: they are installed
+     * on {@code ObjectAnimator.ofFloat} / {@code PropertyValuesHolder.ofFloat}, which every view in
+     * SystemUI calls, so the caller's stack frame is what limits the change to the notification
+     * rows' appear animations (the same test the {@code Arrays.toString(stackTrace).contains(...)}
+     * form does, without building the string).
+     */
+    private static boolean fromAppearAnimationScale() {
+        StackTraceElement[] stack = Thread.currentThread().getStackTrace();
+        for (int i = 0; i < stack.length; i++) {
+            StackTraceElement frame = stack[i];
+            if ("com.android.systemui.statusbar.notification.row.ActivatableNotificationView"
+                    .equals(frame.getClassName())
+                    && "updateAppearAnimationScale".equals(frame.getMethodName())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
      * The classic card surface: optionally erase what the vendor painted under the card, put the
      * cover's scrim back, then draw the calibrated translucent white.
      *
@@ -1614,18 +1753,20 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
      * carries (so the plate is unchanged where a mask is configured), and draws the white last: the
      * only thing that can show through is the shade window's backdrop blur.
      *
-     * <p><b>The punch is off for the control centre's two cards</b> ({@link #eraseUnder}, set by
-     * {@link #applyQsCardFill}).  They do not need it -- their row sits above the tile grid, nothing
-     * is ever laid out under them -- and it is what broke the tile-edit transition (报告: 进入/退出
-     * 磁贴编辑时圆角矩形透出模糊层).  The vendor fades the whole control centre out for that
-     * transition through {@code mz_expanded_qs_scroll_view.setAlpha()} (measured with a tree dump:
-     * 1.00 -&gt; 0.66 at +120ms -&gt; 0.05 at +400ms).  A {@code CLEAR} op is replayed from the card's
-     * cached display list and is <em>not</em> scaled by that alpha, while the scrim and the fill in
-     * the same list are: the white plate stayed punched out and the card faded away from over the
-     * hole, so the card's rounded rectangle became a window onto the backdrop blur.  Without the
-     * punch the plate is left intact and the card fades into it -- the white mask the user expects.
-     * Nothing is lost visually: the scrim is still painted at {@code 0xE0} over whatever happens to
-     * be underneath, so even a tile passing under the card is attenuated to well under one level.
+     * <p><b>A punched card may not fade below its own fill.</b>  The {@code CLEAR} op is replayed
+     * from the cached display list at full strength, while the scrim and the white above it
+     * <em>are</em> scaled by whatever alpha animates the surface: the plate stays punched out and
+     * the card fades away from over the hole, so its rounded rectangle becomes a window onto the
+     * backdrop blur.  That is what the control centre's two cards hit during the tile-edit transition
+     * (报告: 进入/退出磁贴编辑时圆角矩形透出模糊层); they alone therefore paint without the punch
+     * ({@link #eraseUnder}, set by {@link #applyQsCardFill}), because their row sits above the tile
+     * grid and nothing is ever laid out under them.
+     *
+     * <p>The notification rows and the media card keep the punch, so their fades are solved in the
+     * animation instead: the alpha values of the arrival pop and of the dismissal are clamped to the
+     * fill's own alpha, {@code 0xDD / 0xFF} = 0.8667 (see the animator-factory hooks in
+     * {@link #hookNotificationCardTint}), so the white never thins out below the translucency the
+     * card paints with anyway -- 报告: 新通知弹出时卡片没有染色 / 关闭通知的动画中卡片没有染色.
      */
     private static final class ClassicCardFill extends android.graphics.drawable.Drawable {
         private final android.graphics.Path path = new android.graphics.Path();
@@ -1655,6 +1796,14 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
          * centre's two cards -- see the class note.
          */
         private boolean eraseUnder = true;
+        /**
+         * The media card this fill is the background of, when it is one -- the notification rows and
+         * the control centre's cards paint through their own draw paths and leave this null.  Used to
+         * publish the scrim alpha the display list was actually recorded with (see
+         * {@link #sMediaCardScrim}); weak so the drawable, which is itself held by the view, cannot
+         * keep a detached card alive.
+         */
+        private java.lang.ref.WeakReference<View> owner;
 
         ClassicCardFill() {
             this(CARD_BG_COLOR);
@@ -1665,6 +1814,11 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
                     android.graphics.PorterDuff.Mode.CLEAR));
             setCorners(28f, 28f);
             setFill(color);
+        }
+
+        /** See {@link #sMediaCardScrim}: only the media carousel cards need this bookkeeping. */
+        void setOwner(View v) {
+            owner = v == null ? null : new java.lang.ref.WeakReference<>(v);
         }
 
         /** See {@link #eraseUnder}: the control centre's two cards paint without the punch. */
@@ -1716,6 +1870,11 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
             }
             ink.setColor(fill);
             canvas.drawPath(path, ink);
+            // Publish the alpha this display list was recorded with, so the poller can tell a
+            // stale recording from a current one (same bookkeeping as sCardScrim for the rows).
+            java.lang.ref.WeakReference<View> o = owner;
+            View host = o == null ? null : o.get();
+            if (host != null) sMediaCardScrim.put(host, Integer.valueOf(alpha));
         }
 
         @Override
@@ -1761,15 +1920,16 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
      * The module's own {@link ClassicCardFill} for one view, configured for {@code color} and the two
      * corner radii, created on first use.
      *
-     * <p>Shared by the notification rows (which carry {@link #notificationFill()}) and the control
-     * centre's two cards ({@code connectivity_tiles_wrapper} and {@code slider_wrapper}, which carry
-     * {@link #notificationFill()} in the light theme and {@link #cardColor()} at night), because all
-     * of them need the same layers in the same order: lay the cover's scrim back down at the alpha the
-     * cover currently carries, then paint the surface.  The rows (and the media card) additionally
-     * erase what the vendor painted under the shape first; the control centre's two cards do not --
-     * see {@link ClassicCardFill#setEraseUnder}.  The fill drawable <em>is</em> the view's background
-     * for the control centre cards and only the row's own draw layer for the rows, so the two paths
-     * differ in where they are installed (see {@link #applyQsCardFill}), never in what is painted.
+     * <p>Shared by the notification rows (which carry {@link #notificationFill()}), the media card
+     * and the control centre's two cards ({@code connectivity_tiles_wrapper} and
+     * {@code slider_wrapper}, which carry {@link #notificationFill()} in the light theme and
+     * {@link #cardColor()} at night), because all of them need the same layers in the same order: lay
+     * the cover's scrim back down at the alpha the cover currently carries, then paint the surface.
+     * The rows (and the media card) additionally erase what the vendor painted under the shape first;
+     * the control centre's two cards do not -- see {@link ClassicCardFill#setEraseUnder}.  The fill
+     * drawable <em>is</em> the view's background for the control centre cards and the media card, and
+     * only the row's own draw layer for the rows, so the paths differ in where they are installed
+     * (see {@link #applyQsCardFill}), never in what is painted.
      *
      * <p>The stored colour is compared on every call and written through {@link
      * ClassicCardFill#setFill} when it moved, which is what makes a theme switch (or a change of the
@@ -2247,14 +2407,21 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
      *
      * <p>The card is then taken over exactly like a row: while the classic veil is up its fill
      * becomes the module's {@link #notificationFill()} in the card's own {@code mClipCornerRadius}
-     * shape, and the vendor's blurred-artwork layer ({@code id/media_mask_bg}, an
+     * shape, and the card's vendor blurred-artwork layer ({@code id/media_mask_bg}, an
      * {@code ImageFilterView} that carries the media-wallpaper artwork) is emptied so it cannot paint
      * over the white.  Recolouring the vendor's blur drawable instead of replacing it was measured
      * on the device and does not reach the rows' surface (235..237 against their 250); the numbers
      * and the reason are in {@link #applyMediaCardTint}.
      *
+     * <p><b>There is one card per media session.</b>  The carousel's {@code LinearLayout}
+     * ({@code id/media_carousel}) holds one {@code MediaCarouseTransitionLayout} per open session,
+     * created by {@code MediaViewHolder.create()} from {@code media_session_view.xml}.  All of them
+     * share {@code id/qs_media_controls}, so the single-card lookup could only ever tint the first
+     * child -- see {@link #applyMediaCardTints}.  Each card has its own artwork mask and its own
+     * state entries, so the whole container has to be visited.
+     *
      * <p>Dark mode is left alone ("去掉通知卡片染色"): the vendor's own frosted night card
-     * ({@code 0xB21A1A1A}) is what the card shows, and the fill is released again as soon as the
+     * ({@code 0xB21A1A1A}) is what the cards show, and the fill is released again as soon as the
      * shade closes or the theme flips.
      */
     private static void hookMediaCardTint(ClassLoader cl) {
@@ -2287,7 +2454,8 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
     }
 
     /**
-     * Give the media card the classic fill, or hand it back to the vendor.
+     * Give <em>one</em> media card the classic fill, or hand it back to the vendor.  The carousel
+     * calls this for every one of its cards -- see {@link #applyMediaCardTints}.
      *
      * <p>{@code classic} is the caller's "the veil is up" state (the poller passes the same
      * {@code open} flag it passes to {@link #applyCardTint}), and dark mode always wins over it, as
@@ -2305,6 +2473,12 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
      * row already sits on the module's own veil.  Painting the fill here instead (rounded by the
      * vendor's own {@code mClipCornerRadius}) lands on the same surface as a row (measured 251/250)
      * and drops the card's 180px blur region with the drawable.
+     *
+     * <p>Like the rows, the card paints the cover's scrim inside its own shape, so its display list
+     * is only correct for the scrim alpha it was recorded with.  The call therefore also compares
+     * {@link #sMediaCardScrim} and invalidates a card whose recording predates the current alpha --
+     * the slow-pull-into-the-control-centre case, where the card is first drawn while the cover is
+     * still ramping and otherwise keeps that thin scrim after the panel has settled.
      */
     private static void applyMediaCardTint(View card, boolean classic) {
         if (card == null || sMediaFilling) return;
@@ -2318,7 +2492,18 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
         android.widget.ImageView mask = mediaMask(card);
         boolean maskClear = mask == null || mask.getDrawable() == null;
         Integer applied = sMediaCardApplied.get(card);
-        if (ours && maskClear && applied != null && applied.intValue() == notificationFill()) return;
+        boolean current = ours && maskClear && applied != null
+                && applied.intValue() == notificationFill();
+        if (current) {
+            // The fill is right; only a display list recorded with an earlier (thinner) scrim may
+            // still be on screen.  This is the slow-pull bug: the media card is drawn while the
+            // cover is still ramping, and nothing else invalidates it once the panel settles.
+            int scrimAlpha = cardScrimAlpha();
+            Integer drawnScrim = sMediaCardScrim.get(card);
+            if (drawnScrim != null && drawnScrim.intValue() == scrimAlpha) return;
+            if (card.isShown()) card.invalidate();
+            return;
+        }
         sMediaFilling = true;
         try {
             if (fill == null) {
@@ -2326,6 +2511,8 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
                 sMediaCardFill.put(card, fill);
             }
             fill.setCornerRadius(mediaCardRadiusPx(card));
+            fill.setFill(notificationFill());
+            fill.setOwner(card);
             card.setBackground(fill);
             if (mask != null) {
                 // The card's second vendor layer: the media-wallpaper artwork set by
@@ -2354,6 +2541,7 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
      */
     private static void restoreMediaCard(View card) {
         sMediaCardApplied.remove(card);
+        sMediaCardScrim.remove(card);
         android.widget.ImageView mask = mediaMask(card);
         android.graphics.drawable.Drawable art = sMediaMaskArt.remove(card);
         if (art != null && mask != null && mask.getDrawable() == null) {
@@ -2388,17 +2576,61 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
     }
 
     /**
-     * The media card in the shade, cached -- it is inflated once and lives as long as the shade, so
-     * the poller must not walk the tree for it every frame.  Re-found when it is detached (the carousel
-     * is re-inflated on a configuration change).
+     * The carousel's card container ({@code id/media_carousel}), cached -- it is inflated once and
+     * lives as long as the shade, so the poller must not walk the tree for it every frame.  Re-found
+     * when it is detached (the carousel is re-inflated on a configuration change).
+     *
+     * <p>The container is what makes the module reach <em>every</em> media session: each session is
+     * its own {@code MediaCarouseTransitionLayout} child of this {@code LinearLayout}, all carrying
+     * the same {@code id/qs_media_controls} (the root of {@code media_session_view.xml}).  A single
+     * {@code findViewById(qs_media_controls)} returns whichever child happens to be first in the
+     * carousel, not the page on screen, so with two open sessions it tinted the off-screen card and
+     * left the visible one frosted/transparent.
+     */
+    private static ViewGroup mediaContent(ViewGroup root) {
+        ViewGroup v = sMediaContent.get();
+        if (v != null && v.isAttachedToWindow()) return v;
+        if (root == null || idMediaCarousel == 0) return null;
+        View found = root.findViewById(idMediaCarousel);
+        if (found instanceof ViewGroup) {
+            sMediaContent = new java.lang.ref.WeakReference<>((ViewGroup) found);
+            return (ViewGroup) found;
+        }
+        return null;
+    }
+
+    /**
+     * Apply the classic fill to every media card in the carousel (or, on a build without the
+     * {@code media_carousel} id, to the single card {@link #mediaCard} finds).
+     *
+     * <p>This is the multi-session fix.  The vendor keeps one card view per media session in the
+     * carousel, and the shade can show any of them: tinting a single cached card leaves the other
+     * sessions with the vendor's frosted/album-art surface -- the reported "another app opens a
+     * media session and the visible card goes transparent, while the previous card stays tinted".
+     * Each card carries its own state in {@link #sMediaCardFill} / {@link #sMediaCardApplied} /
+     * {@link #sMediaMaskArt}, so applying to the whole container is idempotent and cheap.
+     */
+    private static void applyMediaCardTints(ViewGroup root, boolean classic) {
+        ViewGroup content = mediaContent(root);
+        if (content == null) {
+            applyMediaCardTint(mediaCard(root), classic);
+            return;
+        }
+        for (int i = 0, n = content.getChildCount(); i < n; i++) {
+            View card = content.getChildAt(i);
+            if (card != null && card.getId() == idMediaControls) {
+                applyMediaCardTint(card, classic);
+            }
+        }
+    }
+
+    /**
+     * The first media card in the shade, used only as a fallback when the carousel container cannot
+     * be resolved (see {@link #mediaContent}).
      */
     private static View mediaCard(ViewGroup root) {
-        View v = sMediaCard.get();
-        if (v != null && v.isAttachedToWindow()) return v;
         if (root == null || idMediaControls == 0) return null;
-        v = root.findViewById(idMediaControls);
-        if (v != null) sMediaCard = new java.lang.ref.WeakReference<>(v);
-        return v;
+        return root.findViewById(idMediaControls);
     }
 
     /**
@@ -4145,6 +4377,26 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
     }
 
     /**
+     * The system's animator duration scale (Developer options -> "Animator duration scale", or the
+     * accessibility "Remove animations" switch), i.e. the same scale the platform applies to its
+     * own ValueAnimators.  0 means animations are off; callers should switch instantly.
+     *
+     * <p>The module targets Android 15, so {@link android.animation.ValueAnimator#getDurationScale()}
+     * (public since API 26) is always available.
+     */
+    private static float animatorDurationScale() {
+        try {
+            float scale = 0;
+            if (android.os.Build.VERSION.SDK_INT >= 33) {
+                scale = android.animation.ValueAnimator.getDurationScale();
+            }
+            if (scale >= 0f && !Float.isInfinite(scale)) return scale;
+        } catch (Throwable ignored) {
+        }
+        return 1f;
+    }
+
+    /**
      * The cover may only be opaque while the shade is pulled down; on the lock screen it has to
      * stay invisible.  "isAnyExpanded" is the authoritative flag; the numeric expansion is only
      * used to fade the cover in while the shade is being dragged.
@@ -4225,7 +4477,7 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
         }
         boolean kg = keyguardShowing();
         // The veil follows the notification shade's own expansion -- mExpandedHeight / the shade
-        // window (getExpandedFraction()), which is the "full pull" the two COVER_* constants are
+        // window (getExpandedFraction()), which is the "full pull" the COVER_* thresholds are
         // fractions of -- and NOT the shade-interactor flows.
         //
         // getQsExpansion()/getAnyExpansion() are 1.0 as soon as the QS/control-centre page is the
@@ -4242,13 +4494,33 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
             // own expansion flow, never to qsExpansion (see above).  NaN falls through to 0.
             drive = shadeFlow >= 0f ? shadeFlow : 0f;
         }
-        // Mask ramp: nothing below COVER_MIN_EXPANSION (1% of a full pull, 32px), a straight line to
-        // full white at COVER_MASK_FULL_AT (7%, 223px), 1 after that.  The blur runs on its own,
-        // slower ramp (COVER_BLUR_FULL_AT), so the white is fully up first.
-        float a = 0f;
-        if (drive > COVER_MIN_EXPANSION) {
-            float ramp = (drive - COVER_MIN_EXPANSION) / (COVER_MASK_FULL_AT - COVER_MIN_EXPANSION);
-            a = Math.max(0f, Math.min(1f, ramp));
+        // White mask: a COVER_MASK_FADE_MS x animator-scale fade-in once COVER_MASK_START_AT is
+        // reached, and a fade-out of the same speed when the shade comes back below it.  A
+        // direction change restarts the tween from the alpha currently on screen and shortens its
+        // duration to the distance still to travel, so a half-done fade reverses in half the time.
+        long now = android.os.SystemClock.uptimeMillis();
+        float target = drive >= COVER_MASK_START_AT ? 1f : 0f;
+        if (target != sMaskFadeTo) {
+            sMaskFadeFrom = sMaskAlpha;   // continue from what is on screen
+            sMaskFadeTo = target;
+            long duration = Math.round(COVER_MASK_FADE_MS * (double) animatorDurationScale()
+                    * Math.abs(target - sMaskFadeFrom));
+            sMaskFadeMs = duration > 0L ? duration : 0L;   // scale 0 = animations off -> instant
+            sMaskFadeStart = sMaskFadeMs > 0L ? now : 0L;
+        }
+        float a;
+        if (sMaskFadeStart == 0L) {
+            a = sMaskFadeTo;
+        } else {
+            long elapsed = now - sMaskFadeStart;
+            if (elapsed < 0L) elapsed = 0L;
+            float t = elapsed >= sMaskFadeMs
+                    ? 1f : (float) elapsed / (float) sMaskFadeMs;
+            a = sMaskFadeFrom + (sMaskFadeTo - sMaskFadeFrom) * t;
+            if (t >= 1f) {
+                a = sMaskFadeTo;
+                sMaskFadeStart = 0L;
+            }
         }
         // The lock screen keeps the stock look -- but ONLY while its shade is tucked away.  The
         // keyguard flag is unreliable: it flips back to true once an unlocked shade settles, which
@@ -4307,21 +4579,25 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
             hideWallpaperLayers(kgRoot, false);
             if (MASK_ON_MIRROR) clearMirrorMask();
             applyCardTint(false);   // lock screen keeps the stock card fill
-            applyMediaCardTint(mediaCard(kgRoot), false);
+            applyMediaCardTints(kgRoot, false);
             sShadeOpen = false;
             // No drag on the lock screen: release the blur so the stock look comes back.
             sBlurDrive = 0f;
             sMaskAlpha = 0f;
+            sMaskFadeStart = 0L;
+            sMaskFadeFrom = 0f;
+            sMaskFadeTo = 0f;
+            sMaskFadeMs = 0L;
             driveCoverBlur(cover);
             driveCoverBlurAlpha(cover, 255);
             driveShadeWindowBlur();
             return;
         }
-        boolean open = a > 0.005f;   // the veil is up as soon as the shade has really moved
         // The cover carries the blur region, so it has to be visible from the first pixel of the
         // pull: showing it only once the mask starts (which is what `open` means) is what made the
         // backdrop jump from sharp to fully blurred at 262px.
         boolean dragging = drive > 0.0015f;   // ~5px of travel
+        boolean open = dragging && a > 0.005f;   // veil visible while the shade is still on screen
         sShadeOpen = open || dragging;
         if (sShadeOpen && sPanelController != null) {
             // The chip's x offset is the cutout inset the vendor writes; re-measure it while the shade
@@ -4356,7 +4632,7 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
             cover.setVisibility(View.INVISIBLE);
             if (MASK_ON_MIRROR) clearMirrorMask();
             applyCardTint(false);   // shade closed: the rows go back to the vendor's own fill
-            applyMediaCardTint(mediaCard(shadeRoot), false);
+            applyMediaCardTints(shadeRoot, false);
             // ... and the control centre's cards are kept on the current theme by the repaint at the
             // top of this method (it runs on every tick, whichever branch is taken below).
         } else {
@@ -4369,8 +4645,9 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
             applyCardTint(open);
             // ... and the media player card is the same surface, on its own class (hook 7m): the
             // vendor rebuilds it on every media / live-notification change, so it is re-applied
-            // here as well, on the same "veil is up" gate the rows use.
-            applyMediaCardTint(mediaCard(shadeRoot), open);
+            // here as well, on the same "veil is up" gate the rows use.  Every session card in the
+            // carousel is visited -- see applyMediaCardTints.
+            applyMediaCardTints(shadeRoot, open);
         }
     }
 
@@ -4956,6 +5233,10 @@ public class hook implements IXposedHookLoadPackage, IXposedHookInitPackageResou
             cover.setVisibility(View.INVISIBLE);
             sBlurDrive = 0f;
             sMaskAlpha = 0f;
+            sMaskFadeStart = 0L;
+            sMaskFadeFrom = 0f;
+            sMaskFadeTo = 0f;
+            sMaskFadeMs = 0L;
             driveCoverBlur(cover);
         }
     }
